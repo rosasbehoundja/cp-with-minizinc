@@ -6,8 +6,15 @@
 % @url: https://ifri-ai-classes.github.io/MPVRP-CC/
 % @date: 06.2026
 % ----------
+include "alldifferent_except.mzn";
+include "alldifferent_except_0.mzn";
+include "among.mzn";
+include "at_most.mzn";
+include "cumulative.mzn";
 include "globals.mzn";
 include "subcircuit.mzn";
+include "path.mzn";
+
 % ----> parameters
 int: N_PRODS;
 int: N_DEPOT_PRODUCTS;
@@ -24,6 +31,8 @@ set of int: REQUESTS = (N_DEPOT_PRODUCTS + N_GARAGES + 1)..N_NODES;
 set of int: VEHICLES = 1..N_VEHICLES;
 
 array[PRODUCTS, PRODUCTS] of float: changeover_cost;
+
+% Data dimensions declared explicitly as 1-indexed to match data file literals
 array[1..N_DEPOT_PRODUCTS] of int: depot_id;
 array[1..N_DEPOT_PRODUCTS] of int: depot_product;
 array[1..N_DEPOT_PRODUCTS] of float: depot_stock;
@@ -42,16 +51,31 @@ array[1..N_REQUESTS] of float: request_y;
 
 array[VEHICLES] of int: vehicle_id;
 array[VEHICLES] of float: vehicle_capacity;
-array[VEHICLES] of int: vehicle_home_garage;
+array[VEHICLES] of int: vehicle_home_garage_raw; 
 array[VEHICLES] of int: vehicle_init_product;
 
 array[1..N_NODES,1..N_NODES] of float: dist; 
 
+% ----> Derived/Coerced Mappings for Global Node Alignment
+array[VEHICLES] of int: vehicle_home_garage = [
+    vehicle_home_garage_raw[v] + N_DEPOT_PRODUCTS | v in VEHICLES
+];
+
+array[REQUESTS] of int: req_product = array1d(REQUESTS, request_product);
+array[REQUESTS] of float: req_demand = array1d(REQUESTS, request_demand);
+
+% ----> Bornes supérieures pour borner les variables de décision float
+float: MAX_CAPACITY = max(vehicle_capacity);
+float: MAX_DEMAND_SUM = sum(request_demand);
+float: MAX_DIST_SUM = sum(i, j in NODES)(dist[i,j]);
+float: MAX_CHANGEOVER_SUM = sum(p1, p2 in PRODUCTS)(changeover_cost[p1, p2]) * N_NODES;
+float: MAX_COST_SUM = MAX_DIST_SUM + MAX_CHANGEOVER_SUM;
+
 % ----> decisions variables
 array[VEHICLES, NODES] of var NODES: next;     % next[v, i] = n <-> node n is visited after node i by vehicle v.
 array[VEHICLES, NODES] of var PRODUCTS: prod;  % prod[v, i] = p <-> prod p is carried after node i by vehicle v.
-array[VEHICLES, NODES] of var float: qty;      % qty[v, i] <-> qty delivred (if node = request) or loaded (if node = depot) by vehicle v at node i.
-array[VEHICLES, NODES] of var float: carried;  % carried[v, i] <-> qty carried by vehicle v after leaving node i.
+array[VEHICLES, NODES] of var 0.0..MAX_DEMAND_SUM: qty;      % qty[v, i] <-> qty delivered/loaded.
+array[VEHICLES, NODES] of var 0.0..MAX_CAPACITY: carried;  % carried[v, i] <-> qty carried after leaving node i.
 array[VEHICLES, NODES] of var bool: visited;   % visited[v, i] = 1 <-> vehicle v visits node i.
 array[VEHICLES] of var bool: isUsed;           % isUsed[v] = 1 <-> vehicle v is used.
 
@@ -72,12 +96,12 @@ constraint forall(v in VEHICLES) (
     carried[v, vehicle_home_garage[v]] = 0.0
 );
 
-% 1. a vehicle is used if it leaves its home garage
+% 1. A vehicle is used if it leaves its home garage
 constraint forall(v in VEHICLES) (
     isUsed[v] = visited[v, vehicle_home_garage[v]]
 );
 
-% 2. unused vehicles cannot visit any node
+% 2. Unused vehicles cannot visit any node
 constraint forall(v in VEHICLES, i in NODES) (
     not isUsed[v] -> not visited[v, i]
 );
@@ -92,15 +116,12 @@ constraint forall(v in VEHICLES) (
     isUsed[v] -> (prod[v, vehicle_home_garage[v]] = vehicle_init_product[v])
 );
 
-% 5. The route of a vehicle must end at a garage (which points back to close the home garage circuit)
-constraint forall(v in VEHICLES) (
-    isUsed[v] -> exists(g in GARAGES) (
-        visited[v, g] /\ next[v, g] = vehicle_home_garage[v]
-    )
+% 5. A vehicle can NEVER visit a garage that is not its assigned home garage
+constraint forall(v in VEHICLES, g in GARAGES) (
+    g != vehicle_home_garage[v] -> not visited[v, g]
 );
 
 % 6. Product changes/loading can only occur at a depot node
-% If the next node is NOT a depot, the product state cannot change
 constraint forall(v in VEHICLES, i in NODES) (
     (visited[v, i] /\ not (next[v, i] in DEPOTS)) -> (prod[v, next[v, i]] = prod[v, i])
 );
@@ -112,12 +133,12 @@ constraint forall(v in VEHICLES, d in DEPOTS) (
 
 % A vehicle cannot visit a request node without carrying the product needed by it
 constraint forall(v in VEHICLES, r in REQUESTS) (
-    visited[v, r] -> (prod[v, r] = request_product[r])
+    visited[v, r] -> (prod[v, r] = req_product[r])
 );
 
 % A vehicle can never carry more than its capacity
 constraint forall(v in VEHICLES, i in NODES) (
-    carried[v, i] <= vehicle_capacity[v] /\ carried[v, i] >= 0.0
+    carried[v, i] <= vehicle_capacity[v]
 );
 
 % A vehicle must deliver a strictly positive quantity to a visited request node
@@ -130,9 +151,9 @@ constraint forall(v in VEHICLES, i in NODES) (
     not visited[v, i] -> (qty[v, i] = 0.0 /\ carried[v, i] = 0.0)
 );
 
-% All requests must be completely satisfied (allows split deliveries across multiple vehicles)
+% All requests must be completely satisfied
 constraint forall(r in REQUESTS) (
-    sum(v in VEHICLES) (qty[v, r]) = request_demand[r]
+    sum(v in VEHICLES) (qty[v, r]) = req_demand[r]
 );
 
 % A vehicle cannot transition to a request node if its incoming carried quantity is zero
@@ -171,18 +192,11 @@ constraint forall(d in DEPOTS) (
 );
 
 % ----> objective function
-
-% Calculate total routing distance
-var float: total_dist = sum(v in VEHICLES, i in NODES)(if visited[v, i] then dist[i, next[v, i]] else 0.0 endif);
-
-% Calculate changeover costs between product states
-var float: total_changeover = sum(v in VEHICLES, i in NODES)(if visited[v, i] then changeover_cost[prod[v, i], prod[v, next[v, i]]] else 0.0 endif);
-
-var float: total_cost = total_dist + total_changeover;
+var 0.0..MAX_DIST_SUM: total_dist = sum(v in VEHICLES, i in NODES)(if visited[v, i] then dist[i, next[v, i]] else 0.0 endif);
+var 0.0..MAX_CHANGEOVER_SUM: total_changeover = sum(v in VEHICLES, i in NODES)(if visited[v, i] then changeover_cost[prod[v, i], prod[v, next[v, i]]] else 0.0 endif);
+var 0.0..MAX_COST_SUM: total_cost = total_dist + total_changeover;
 
 % ----> search
-% We prioritize branching on the 'next' routing variables using first_fail,
-% which quickly builds out viable routing loops before deciding quantities.
 solve :: int_search([next[v, i] | v in VEHICLES, i in NODES], first_fail, indomain_min) minimize total_cost;
 
 % ----> output displaying
@@ -207,5 +221,3 @@ output [
         "  No active routes.\n" 
     endif ++ "-----------------------------------------------------------\n"
 | v in VEHICLES];
-
-

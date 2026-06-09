@@ -187,7 +187,7 @@ def export_to_dzn(inst):
     
     lines.append(f"vehicle_id = {fmt_1d([v['id'] for v in inst.vehicles])};")
     lines.append(f"vehicle_capacity = {fmt_1d([v['capacity'] for v in inst.vehicles])};")
-    lines.append(f"vehicle_home_garage = {fmt_1d([garage_id_to_idx[v['home_garage_id']] for v in inst.vehicles])};")
+    lines.append(f"vehicle_home_garage_raw = {fmt_1d([garage_id_to_idx[v['home_garage_id']] for v in inst.vehicles])};")
     
     # Accounts for initial product being unassigned (-1 -> 0) or 0-indexed (0 -> 1)
     # print([v['init_prod'] for v in inst.vehicles])

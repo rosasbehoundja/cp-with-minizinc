@@ -194,7 +194,7 @@ constraint forall(d in DEPOTS) (
     sum(v in VEHICLES) (qty[v, d]) <= depot_stock_int[d]
 );
 
-% ----> objective function (Utilise désormais des entiers indexés par des variables sans erreur)
+% ----> objective function
 var 0..MAX_DIST_SUM: total_dist = sum(v in VEHICLES, i in NODES)(if visited[v, i] then dist_int[i, next[v, i]] else 0 endif);
 var 0..MAX_CHANGEOVER_SUM: total_changeover = sum(v in VEHICLES, i in NODES)(if visited[v, i] then changeover_cost_int[prod[v, i], prod[v, next[v, i]]] else 0 endif);
 var 0..MAX_COST_SUM: total_cost = total_dist + total_changeover;
@@ -208,7 +208,7 @@ solve :: seq_search([
 ]) minimize total_cost;
 
 
-% ----> output displaying (Division par SCALE pour retrouver les vraies valeurs float d'origine)
+% ----> output displaying
 output [
     "===========================================================\n",
     " MPVRP-CC OPTIMIZATION RESULTS\n",

@@ -8,6 +8,9 @@
 % ----------
 include "globals.mzn";
 include "subcircuit.mzn";
+
+int: SCALE = 1000;
+
 % ----> parameters
 int: N_PRODS;
 int: N_DEPOT_PRODUCTS;
@@ -24,9 +27,14 @@ set of int: REQUESTS = (N_DEPOT_PRODUCTS + N_GARAGES + 1)..N_NODES;
 set of int: VEHICLES = 1..N_VEHICLES;
 
 array[PRODUCTS, PRODUCTS] of float: changeover_cost;
+% conversion en `int`
+array[PRODUCTS, PRODUCTS] of int: changeover_cost_int = array2d(PRODUCTS, PRODUCTS, [round(changeover_cost[p1, p2] * SCALE) | p1, p2 in PRODUCTS]);
+
 array[1..N_DEPOT_PRODUCTS] of int: depot_id;
 array[1..N_DEPOT_PRODUCTS] of int: depot_product;
 array[1..N_DEPOT_PRODUCTS] of float: depot_stock;
+% conversion en `int`
+array[1..N_DEPOT_PRODUCTS] of int: depot_stock_int = [round(depot_stock[d] * SCALE) | d in 1..N_DEPOT_PRODUCTS];
 array[1..N_DEPOT_PRODUCTS] of float: depot_x;
 array[1..N_DEPOT_PRODUCTS] of float: depot_y;
 
@@ -37,23 +45,44 @@ array[1..N_GARAGES] of float: garage_y;
 array[1..N_REQUESTS] of int: request_id;
 array[1..N_REQUESTS] of int: request_product;
 array[1..N_REQUESTS] of float: request_demand;
+% conversion en `int`
+array[1..N_REQUESTS] of int: request_demand_int = [round(request_demand[r] * SCALE) | r in 1..N_REQUESTS];
 array[1..N_REQUESTS] of float: request_x;
 array[1..N_REQUESTS] of float: request_y;
 
 array[VEHICLES] of int: vehicle_id;
 array[VEHICLES] of float: vehicle_capacity;
-array[VEHICLES] of int: vehicle_home_garage;
+% conversion en `int`
+array[VEHICLES] of int: vehicle_capacity_int = [round(vehicle_capacity[v] * SCALE) | v in VEHICLES];
+array[VEHICLES] of int: vehicle_home_garage_raw; 
 array[VEHICLES] of int: vehicle_init_product;
 
 array[1..N_NODES,1..N_NODES] of float: dist; 
+% conversion en `int`
+array[1..N_NODES,1..N_NODES] of int: dist_int = array2d(1..N_NODES, 1..N_NODES, [round(dist[i, j] * SCALE) | i, j in 1..N_NODES]);
 
-% ----> decisions variables
+% ----> Derived/Coerced Mappings for Global Node Alignment
+array[VEHICLES] of int: vehicle_home_garage = [
+    vehicle_home_garage_raw[v] + N_DEPOT_PRODUCTS | v in VEHICLES
+];
+
+array[REQUESTS] of int: req_product = array1d(REQUESTS, request_product);
+array[REQUESTS] of int: req_demand = array1d(REQUESTS, request_demand_int);
+
+% ----> Bornes supérieures pour borner les variables de décision float
+int: MAX_CAPACITY = max(vehicle_capacity_int);
+int: MAX_DEMAND_SUM = sum(request_demand_int);
+int: MAX_DIST_SUM = sum(i, j in NODES)(dist_int[i, j]);
+int: MAX_CHANGEOVER_SUM = sum(p1, p2 in PRODUCTS)(changeover_cost_int[p1, p2]) * N_NODES;
+int: MAX_COST_SUM = MAX_DIST_SUM + MAX_CHANGEOVER_SUM;
+
+% ----> decisions variables (Domaines entiers explicites)
 array[VEHICLES, NODES] of var NODES: next;     % next[v, i] = n <-> node n is visited after node i by vehicle v.
 array[VEHICLES, NODES] of var PRODUCTS: prod;  % prod[v, i] = p <-> prod p is carried after node i by vehicle v.
-array[VEHICLES, NODES] of var float: qty;      % qty[v, i] <-> qty delivred (if node = request) or loaded (if node = depot) by vehicle v at node i.
-array[VEHICLES, NODES] of var float: carried;  % carried[v, i] <-> qty carried by vehicle v after leaving node i.
-array[VEHICLES, NODES] of var bool: visited;   % visited[v, i] = 1 <-> vehicle v visits node i.
-array[VEHICLES] of var bool: isUsed;           % isUsed[v] = 1 <-> vehicle v is used.
+array[VEHICLES, NODES] of var 0..MAX_DEMAND_SUM: qty; % qty[v, i] <-> qty delivered/loaded.     
+array[VEHICLES, NODES] of var 0..MAX_CAPACITY: carried;  % carried[v, i] <-> qty carried after leaving node i.
+array[VEHICLES, NODES] of var bool: visited;  % visited[v, i] = 1 <-> vehicle v visits node i.  
+array[VEHICLES] of var bool: isUsed;   % isUsed[v] = 1 <-> vehicle v is used.         
 
 % ----> constraints 
 
@@ -69,38 +98,35 @@ constraint forall(v in VEHICLES) (
 
 % Vehicles start with an empty load at their home garage
 constraint forall(v in VEHICLES) (
-    carried[v, vehicle_home_garage[v]] = 0.0
+    carried[v, vehicle_home_garage[v]] = 0
 );
 
-% 1. a vehicle is used if it leaves its home garage
+% A vehicle is used if it leaves its home garage
 constraint forall(v in VEHICLES) (
     isUsed[v] = visited[v, vehicle_home_garage[v]]
 );
 
-% 2. unused vehicles cannot visit any node
+% Unused vehicles cannot visit any node
 constraint forall(v in VEHICLES, i in NODES) (
     not isUsed[v] -> not visited[v, i]
 );
 
-% 3. If a vehicle is used, it must start at its home garage and go directly to a depot
+% If a vehicle is used, it must start at its home garage and go directly to a depot
 constraint forall(v in VEHICLES) (
     isUsed[v] -> (next[v, vehicle_home_garage[v]] in DEPOTS)
 );
 
-% 4. The vehicle must start with its designated initial product
+% The vehicle must start with its designated initial product
 constraint forall(v in VEHICLES) (
     isUsed[v] -> (prod[v, vehicle_home_garage[v]] = vehicle_init_product[v])
 );
 
-% 5. The route of a vehicle must end at a garage (which points back to close the home garage circuit)
-constraint forall(v in VEHICLES) (
-    isUsed[v] -> exists(g in GARAGES) (
-        visited[v, g] /\ next[v, g] = vehicle_home_garage[v]
-    )
+% A vehicle can NEVER visit a garage that is not its assigned home garage
+constraint forall(v in VEHICLES, g in GARAGES) (
+    g != vehicle_home_garage[v] -> not visited[v, g]
 );
 
-% 6. Product changes/loading can only occur at a depot node
-% If the next node is NOT a depot, the product state cannot change
+% Product changes/loading can only occur at a depot node
 constraint forall(v in VEHICLES, i in NODES) (
     (visited[v, i] /\ not (next[v, i] in DEPOTS)) -> (prod[v, next[v, i]] = prod[v, i])
 );
@@ -112,32 +138,32 @@ constraint forall(v in VEHICLES, d in DEPOTS) (
 
 % A vehicle cannot visit a request node without carrying the product needed by it
 constraint forall(v in VEHICLES, r in REQUESTS) (
-    visited[v, r] -> (prod[v, r] = request_product[r])
+    visited[v, r] -> (prod[v, r] = req_product[r])
 );
 
 % A vehicle can never carry more than its capacity
 constraint forall(v in VEHICLES, i in NODES) (
-    carried[v, i] <= vehicle_capacity[v] /\ carried[v, i] >= 0.0
+    carried[v, i] <= vehicle_capacity_int[v]
 );
 
 % A vehicle must deliver a strictly positive quantity to a visited request node
 constraint forall(v in VEHICLES, r in REQUESTS) (
-    visited[v, r] -> (qty[v, r] > 0.0)
+    visited[v, r] -> (qty[v, r] > 0)
 );
 
 % If a node is not visited by a vehicle, its delivered quantity and carried load are zero
 constraint forall(v in VEHICLES, i in NODES) (
-    not visited[v, i] -> (qty[v, i] = 0.0 /\ carried[v, i] = 0.0)
+    not visited[v, i] -> (qty[v, i] = 0 /\ carried[v, i] = 0)
 );
 
-% All requests must be completely satisfied (allows split deliveries across multiple vehicles)
+% All requests must be completely satisfied
 constraint forall(r in REQUESTS) (
-    sum(v in VEHICLES) (qty[v, r]) = request_demand[r]
+    sum(v in VEHICLES) (qty[v, r]) = req_demand[r]
 );
 
 % A vehicle cannot transition to a request node if its incoming carried quantity is zero
 constraint forall(v in VEHICLES, i in NODES) (
-    (visited[v, i] /\ next[v, i] in REQUESTS) -> (carried[v, i] > 0.0)
+    (visited[v, i] /\ next[v, i] in REQUESTS) -> (carried[v, i] > 0)
 );
 
 % Quantity tracking along the route
@@ -147,7 +173,6 @@ constraint forall(v in VEHICLES, i in NODES) (
         if j in REQUESTS then
             % At a request node: drop off quantity
             carried[v, j] = carried[v, i] - qty[v, j]
-            
         elseif j in DEPOTS then
             % At a depot node: check if product changes
             if prod[v, j] != prod[v, i] then
@@ -157,42 +182,40 @@ constraint forall(v in VEHICLES, i in NODES) (
                 % Same product: top up the existing load
                 carried[v, j] = carried[v, i] + qty[v, j]
             endif
-            
         else 
             % j in GARAGES: Route ends, vehicle returns empty
-            carried[v, j] = 0.0
+            carried[v, j] = 0
         endif
     )
 );
 
 % The total quantity loaded from any depot cannot exceed its available stock
 constraint forall(d in DEPOTS) (
-    sum(v in VEHICLES) (qty[v, d]) <= depot_stock[d]
+    sum(v in VEHICLES) (qty[v, d]) <= depot_stock_int[d]
 );
 
-% ----> objective function
-
-% Calculate total routing distance
-var float: total_dist = sum(v in VEHICLES, i in NODES)(if visited[v, i] then dist[i, next[v, i]] else 0.0 endif);
-
-% Calculate changeover costs between product states
-var float: total_changeover = sum(v in VEHICLES, i in NODES)(if visited[v, i] then changeover_cost[prod[v, i], prod[v, next[v, i]]] else 0.0 endif);
-
-var float: total_cost = total_dist + total_changeover;
+% ----> objective function (Utilise désormais des entiers indexés par des variables sans erreur)
+var 0..MAX_DIST_SUM: total_dist = sum(v in VEHICLES, i in NODES)(if visited[v, i] then dist_int[i, next[v, i]] else 0 endif);
+var 0..MAX_CHANGEOVER_SUM: total_changeover = sum(v in VEHICLES, i in NODES)(if visited[v, i] then changeover_cost_int[prod[v, i], prod[v, next[v, i]]] else 0 endif);
+var 0..MAX_COST_SUM: total_cost = total_dist + total_changeover;
 
 % ----> search
-% We prioritize branching on the 'next' routing variables using first_fail,
-% which quickly builds out viable routing loops before deciding quantities.
-solve :: int_search([next[v, i] | v in VEHICLES, i in NODES], first_fail, indomain_min) minimize total_cost;
+% Search strategy: routes are established first, then product assignments
+solve :: seq_search([
+    int_search([next[v, i] | v in VEHICLES, i in NODES], dom_w_deg, indomain_random),
+    int_search([prod[v, i] | v in VEHICLES, i in NODES], first_fail, indomain_min),
+    int_search([qty[v, i]  | v in VEHICLES, i in NODES], first_fail, indomain_min)
+]) minimize total_cost;
 
-% ----> output displaying
+
+% ----> output displaying (Division par SCALE pour retrouver les vraies valeurs float d'origine)
 output [
     "===========================================================\n",
     " MPVRP-CC OPTIMIZATION RESULTS\n",
     "===========================================================\n",
-    "Total Optimized Cost : " ++ show(total_cost) ++ "\n",
-    "  - Distance Cost    : " ++ show(total_dist) ++ "\n",
-    "  - Changeover Cost  : " ++ show(total_changeover) ++ "\n",
+    "Total Optimized Cost : " ++ show(total_cost / SCALE) ++ "\n",
+    "  - Distance Cost    : " ++ show(total_dist / SCALE) ++ "\n",
+    "  - Changeover Cost  : " ++ show(total_changeover / SCALE) ++ "\n",
     "===========================================================\n"
 ] ++ [
     "Vehicle " ++ show(v) ++ " [" ++ if fix(isUsed[v]) then "USED" else "UNUSED" endif ++ "]:\n" ++
@@ -200,12 +223,10 @@ output [
         concat([
             "  Node " ++ show(i) ++ " -> Next: " ++ show(fix(next[v, i])) ++ 
             " | Product Carried: " ++ show(fix(prod[v, i])) ++ 
-            " | Load Left: " ++ show(fix(carried[v, i])) ++ 
-            " | Qty Action: " ++ show(fix(qty[v, i])) ++ "\n"
-        | i in NODES where fix(visited[v, i])])
-    else 
-        "  No active routes.\n" 
-    endif ++ "-----------------------------------------------------------\n"
-| v in VEHICLES];
-
-
+            " | Load Left: " ++ show(fix(carried[v, i]) / SCALE) ++ 
+            " | Qty Action: " ++ show(fix(qty[v, i]) / SCALE) ++ "\n"
+            | i in NODES
+        ])
+    else "" endif
+    | v in VEHICLES
+];
